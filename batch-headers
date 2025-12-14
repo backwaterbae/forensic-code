@@ -1,0 +1,237 @@
+#!/usr/bin/env python3
+"""
+BatchHeaders py
+Extracts all IP addresses from email headers (.eml files) for forensic analysis
+"""
+
+import email
+from email import policy
+import re
+import csv
+import glob
+
+
+def extract_ips_from_text(text):
+    """Extract all IP addresses from a text string"""
+    # IP pattern - matches IPv4 addresses
+    ip_pattern = r'\b(?:\d{1,3}\.){3}\d{1,3}\b'
+    
+    ips = re.findall(ip_pattern, str(text))
+    
+    # Filter out private/localhost IPs for cleaner results
+    filtered_ips = []
+    for ip in ips:
+        parts = ip.split('.')
+        # Keep private IPs as they might be relevant to internal routing
+        # But flag them
+        if parts[0] == '127':  # localhost
+            continue
+        if parts[0] == '0':  # invalid
+            continue
+        filtered_ips.append(ip)
+    
+    return filtered_ips
+
+
+def parse_received_header(received):
+    """Parse a Received header to extract IP and details"""
+    if not received:
+        return []
+    
+    results = []
+    
+    # Look for "from ... [IP]" pattern
+    from_pattern = r'from\s+([^\s]+)\s+\(([^\)]*)\[(\d+\.\d+\.\d+\.\d+)\]'
+    matches = re.finditer(from_pattern, received, re.IGNORECASE)
+    
+    for match in matches:
+        hostname = match.group(1)
+        description = match.group(2).strip()
+        ip = match.group(3)
+        results.append({
+            'ip': ip,
+            'hostname': hostname,
+            'description': description,
+            'header_type': 'Received-from'
+        })
+    
+    # Also look for standalone [IP] patterns
+    bracket_pattern = r'\[(\d+\.\d+\.\d+\.\d+)\]'
+    bracket_matches = re.finditer(bracket_pattern, received)
+    
+    for match in bracket_matches:
+        ip = match.group(1)
+        # Check if we already got this IP from the more detailed pattern
+        if not any(r['ip'] == ip for r in results):
+            results.append({
+                'ip': ip,
+                'hostname': 'Unknown',
+                'description': 'Extracted from Received header',
+                'header_type': 'Received'
+            })
+    
+    return results
+
+
+def parse_eml_file(filepath):
+    """Parse an .eml file and extract all IPs with metadata"""
+    
+    try:
+        with open(filepath, 'rb') as f:
+            msg = email.message_from_binary_file(f, policy=policy.default)
+        
+        # Extract basic metadata
+        email_from = msg.get('From', 'Unknown')
+        email_to = msg.get('To', 'Unknown')
+        email_subject = msg.get('Subject', 'No Subject')
+        email_date = msg.get('Date', 'Unknown')
+        message_id = msg.get('Message-ID', 'Unknown')
+        
+        # Clean up the values
+        email_from = str(email_from).replace('\n', ' ').replace('\r', ' ').strip()
+        email_to = str(email_to).replace('\n', ' ').replace('\r', ' ').strip()
+        email_subject = str(email_subject).replace('\n', ' ').replace('\r', ' ').strip()
+        
+        ips_found = []
+        
+        # 1. Parse Received headers (these show the routing path)
+        received_headers = msg.get_all('Received', [])
+        for idx, received in enumerate(received_headers):
+            parsed = parse_received_header(received)
+            for ip_info in parsed:
+                ip_info['source_header'] = f'Received-{idx+1}'
+                ips_found.append(ip_info)
+        
+        # 2. Check X-Originating-IP
+        x_orig = msg.get('X-Originating-IP')
+        if x_orig:
+            extracted = extract_ips_from_text(x_orig)
+            for ip in extracted:
+                ips_found.append({
+                    'ip': ip,
+                    'hostname': 'Unknown',
+                    'source_header': 'X-Originating-IP',
+                    'description': x_orig,
+                    'header_type': 'X-Originating-IP'
+                })
+        
+        # 3. Check X-Forwarded-For
+        x_fwd = msg.get('X-Forwarded-For')
+        if x_fwd:
+            extracted = extract_ips_from_text(x_fwd)
+            for ip in extracted:
+                ips_found.append({
+                    'ip': ip,
+                    'hostname': 'Unknown',
+                    'source_header': 'X-Forwarded-For',
+                    'description': x_fwd,
+                    'header_type': 'X-Forwarded-For'
+                })
+        
+        # 4. Check other headers that might contain IPs
+        other_headers = ['X-Sender-IP', 'X-Source-IP', 'X-Real-IP', 'X-Client-IP']
+        for header_name in other_headers:
+            value = msg.get(header_name)
+            if value:
+                extracted = extract_ips_from_text(value)
+                for ip in extracted:
+                    ips_found.append({
+                        'ip': ip,
+                        'hostname': 'Unknown',
+                        'source_header': header_name,
+                        'description': value,
+                        'header_type': header_name
+                    })
+        
+        # Remove duplicates while preserving order and details
+        seen = {}
+        unique_ips = []
+        for ip_info in ips_found:
+            ip = ip_info['ip']
+            if ip not in seen:
+                seen[ip] = True
+                unique_ips.append(ip_info)
+        
+        return {
+            'filename': filepath.split('/')[-1],
+            'from': email_from,
+            'to': email_to,
+            'subject': email_subject,
+            'date': email_date,
+            'message_id': message_id,
+            'ips': unique_ips
+        }
+        
+    except Exception as e:
+        return {
+            'filename': filepath.split('/')[-1],
+            'error': str(e),
+            'ips': []
+        }
+
+
+def main():
+    # Find all .eml files in current directory
+    eml_files = glob.glob('/home/claude/*.eml')
+    
+    print(f"Found {len(eml_files)} .eml files to process\n")
+    
+    all_results = []
+    
+    for eml_file in eml_files:
+        print(f"Processing: {eml_file}")
+        result = parse_eml_file(eml_file)
+        all_results.append(result)
+        
+        if 'error' in result:
+            print(f"  ERROR: {result['error']}")
+        else:
+            print(f"  From: {result['from']}")
+            print(f"  To: {result['to']}")
+            print(f"  Subject: {result['subject']}")
+            print(f"  Date: {result['date']}")
+            print(f"  IPs found: {len(result['ips'])}")
+            for ip_info in result['ips']:
+                print(f"    - {ip_info['ip']} ({ip_info['header_type']})")
+        print()
+    
+    # Export to CSV
+    output_file = '/home/claude/email_ips_extracted.csv'
+    
+    with open(output_file, 'w', newline='') as f:
+        fieldnames = [
+            'Email_File', 'Email_From', 'Email_To', 'Email_Subject', 'Email_Date',
+            'IP_Address', 'Hostname', 'Source_Header', 'Header_Type', 'Description'
+        ]
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        
+        csv_rows = []
+        for result in all_results:
+            if 'error' in result:
+                continue
+            
+            for ip_info in result['ips']:
+                csv_rows.append({
+                    'Email_File': result['filename'],
+                    'Email_From': result['from'],
+                    'Email_To': result['to'],
+                    'Email_Subject': result['subject'],
+                    'Email_Date': result['date'],
+                    'IP_Address': ip_info['ip'],
+                    'Hostname': ip_info.get('hostname', 'Unknown'),
+                    'Source_Header': ip_info.get('source_header', 'Unknown'),
+                    'Header_Type': ip_info.get('header_type', 'Unknown'),
+                    'Description': ip_info.get('description', '')[:200]  # Truncate long descriptions
+                })
+        
+        writer.writerows(csv_rows)
+    
+    print(f"\nExtracted {len(csv_rows)} IP addresses from {len(all_results)} emails")
+    print(f"Results written to: {output_file}")
+    
+    return output_file
+
+
+if __name__ == '__main__':
+    main()
