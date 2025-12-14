@@ -3,7 +3,7 @@
 TeleShot py
 Comprehensive extraction of EXIF metadata and message content from screenshots
 
-Developed for forensic analysis of 169 Telegram "Sicario" group screenshots
+Developed for forensic analysis of Telegram screenshots
 Extracts: EXIF data, timestamps, participants, key terms, URLs, timeline
 
 Author: Lu Esposito (MS Digital Forensics)
