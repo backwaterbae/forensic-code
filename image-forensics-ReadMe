@@ -4,7 +4,7 @@
 - batch-exif-analyzer: reads exif data in batchese
 - exif-extraction: extracts the exif data from images for writing to files
 
-Created for processing 169 Telegram "Sicario" group screenshots
+Created for processing telegram screenshots
 Developed by: Lu Esposito (MS Digital Forensics)
 
 ---
