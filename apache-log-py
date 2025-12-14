@@ -1,0 +1,236 @@
+#!/usr/bin/env python3
+"""
+ApacheLog.py - DFIR Investigation
+Analyzes access and error logs for malicious activity during critical breach period
+"""
+
+import re
+from collections import defaultdict
+from datetime import datetime
+import json
+
+def parse_apache_access_log(line):
+    """Parse Apache access log format"""
+    pattern = r'(\S+) \S+ \S+ \[(.*?)\] "(.*?)" (\d+) (\d+) "(.*?)" "(.*?)"'
+    match = re.match(pattern, line)
+    if match:
+        ip, timestamp, request, status, size, referer, user_agent = match.groups()
+        return {
+            'ip': ip,
+            'timestamp': timestamp,
+            'request': request,
+            'status': status,
+            'size': size,
+            'referer': referer,
+            'user_agent': user_agent
+        }
+    return None
+
+def parse_modsec_error_log(line):
+    """Parse ModSecurity error log format"""
+    # Extract timestamp
+    timestamp_match = re.search(r'\[(.*?)\]', line)
+    timestamp = timestamp_match.group(1) if timestamp_match else None
+    
+    # Extract client IP
+    ip_match = re.search(r'\[client (\d+\.\d+\.\d+\.\d+):', line)
+    ip = ip_match.group(1) if ip_match else None
+    
+    # Extract message
+    msg_match = re.search(r'\[msg "(.*?)"\]', line)
+    msg = msg_match.group(1) if msg_match else None
+    
+    # Extract URI
+    uri_match = re.search(r'\[uri "(.*?)"\]', line)
+    uri = uri_match.group(1) if uri_match else None
+    
+    return {
+        'timestamp': timestamp,
+        'ip': ip,
+        'message': msg,
+        'uri': uri
+    }
+
+def analyze_logs(access_log_path, error_log_path):
+    """Main analysis function"""
+    
+    # Data structures
+    ip_activity = defaultdict(lambda: {
+        'first_seen': None,
+        'last_seen': None,
+        'request_count': 0,
+        'requests': [],
+        'attack_types': set(),
+        'user_agents': set(),
+        'targeted_resources': set(),
+        'status_codes': defaultdict(int)
+    })
+    
+    print("=" * 80)
+    print("DECEMBER 2021 LOG ANALYSIS - BREACH INVESTIGATION")
+    print("=" * 80)
+    print()
+    
+    # Parse access log
+    print("[+] Analyzing access log...")
+    with open(access_log_path, 'r') as f:
+        for line in f:
+            entry = parse_apache_access_log(line.strip())
+            if entry:
+                ip = entry['ip']
+                ip_data = ip_activity[ip]
+                
+                # Update timestamps
+                if ip_data['first_seen'] is None:
+                    ip_data['first_seen'] = entry['timestamp']
+                ip_data['last_seen'] = entry['timestamp']
+                
+                ip_data['request_count'] += 1
+                ip_data['requests'].append({
+                    'timestamp': entry['timestamp'],
+                    'request': entry['request'],
+                    'status': entry['status']
+                })
+                ip_data['user_agents'].add(entry['user_agent'])
+                ip_data['status_codes'][entry['status']] += 1
+                
+                # Identify attack patterns
+                request_lower = entry['request'].lower()
+                if 'xmlrpc' in request_lower:
+                    ip_data['attack_types'].add('XMLRPC Brute Force')
+                    ip_data['targeted_resources'].add('xmlrpc.php')
+                if 'phpmyadmin' in request_lower:
+                    ip_data['attack_types'].add('phpMyAdmin Access')
+                    ip_data['targeted_resources'].add('phpmyadmin')
+                if '/wp-json/' in request_lower:
+                    ip_data['attack_types'].add('WordPress API Enumeration')
+                if '?author=' in request_lower:
+                    ip_data['attack_types'].add('User Enumeration')
+    
+    # Parse error log
+    print("[+] Analyzing error log...")
+    with open(error_log_path, 'r') as f:
+        for line in f:
+            entry = parse_modsec_error_log(line.strip())
+            if entry and entry['ip']:
+                ip = entry['ip']
+                if ip in ip_activity:
+                    if 'XMLRPC' in (entry['message'] or ''):
+                        ip_activity[ip]['attack_types'].add('XMLRPC Blocked')
+                    if 'Brute' in (entry['message'] or '').lower():
+                        ip_activity[ip]['attack_types'].add('Brute Force Detected')
+    
+    print()
+    print("=" * 80)
+    print("ANALYSIS RESULTS")
+    print("=" * 80)
+    print()
+    
+    # Sort IPs by request count
+    sorted_ips = sorted(ip_activity.items(), key=lambda x: x[1]['request_count'], reverse=True)
+    
+    print(f"Total unique IPs detected: {len(sorted_ips)}")
+    print()
+    
+    # Detailed analysis of top IPs
+    print("=" * 80)
+    print("DETAILED IP ANALYSIS (Top 10 by Activity)")
+    print("=" * 80)
+    print()
+    
+    for i, (ip, data) in enumerate(sorted_ips[:10], 1):
+        print(f"\n{'=' * 80}")
+        print(f"IP #{i}: {ip}")
+        print(f"{'=' * 80}")
+        print(f"First Seen:       {data['first_seen']}")
+        print(f"Last Seen:        {data['last_seen']}")
+        print(f"Total Requests:   {data['request_count']}")
+        
+        if data['attack_types']:
+            print(f"Attack Types:     {', '.join(data['attack_types'])}")
+        
+        if data['targeted_resources']:
+            print(f"Targeted:         {', '.join(list(data['targeted_resources'])[:5])}")
+        
+        print(f"Status Codes:")
+        for status, count in sorted(data['status_codes'].items()):
+            print(f"  {status}: {count} requests")
+        
+        print(f"Sample User Agents:")
+        for ua in list(data['user_agents'])[:3]:
+            print(f"  - {ua[:80]}...")
+    
+    # Check for known breach IPs
+    print("\n" + "=" * 80)
+    print("CHECKING FOR KNOWN BREACH IPs")
+    print("=" * 80)
+    print()
+    
+    known_breach_ips = {
+        '75.188.81.189': 'Dec 27 Reconnaissance IP (Columbus Spectrum)',
+        '117.2.24.53': 'Dec 27 Reconnaissance IP (Vietnam)',
+        '92.119.18.51': 'Jan 4 Primary Breach (PacketHub VPN)',
+        '195.22.221.210': 'Jan 22 Exfiltration (Chile)',
+        '103.88.113.62': 'Jan 22 Exfiltration (Vietnam #2)',
+        '52.142.51.9': 'Jan 22 Exfiltration (Azure)'
+    }
+    
+    found_breach_ips = []
+    for known_ip, description in known_breach_ips.items():
+        if known_ip in ip_activity:
+            found_breach_ips.append((known_ip, description))
+            print(f"[!] FOUND BREACH IP: {known_ip}")
+            print(f"    Description: {description}")
+            print(f"    Activity in Dec 2021 logs: {ip_activity[known_ip]['request_count']} requests")
+            print()
+    
+    if not found_breach_ips:
+        print("[i] None of the known breach IPs appear in these December 2021 logs.")
+        print("    Note: Dec 27 IPs may appear - that's when reconnaissance phase began.")
+    
+    # Timeline analysis
+    print("\n" + "=" * 80)
+    print("TEMPORAL ATTACK PATTERNS")
+    print("=" * 80)
+    print()
+    
+    # Group by date
+    daily_activity = defaultdict(lambda: {'ips': set(), 'requests': 0})
+    for ip, data in ip_activity.items():
+        for req in data['requests']:
+            # Extract date from timestamp like "22/Dec/2021:04:05:33 -0500"
+            date_match = re.search(r'(\d+/\w+/\d+)', req['timestamp'])
+            if date_match:
+                date = date_match.group(1)
+                daily_activity[date]['ips'].add(ip)
+                daily_activity[date]['requests'] += 1
+    
+    for date in sorted(daily_activity.keys()):
+        print(f"{date}: {daily_activity[date]['requests']} requests from {len(daily_activity[date]['ips'])} unique IPs")
+    
+    # Export to JSON for further analysis
+    print("\n[+] Exporting detailed data to JSON...")
+    export_data = {}
+    for ip, data in ip_activity.items():
+        export_data[ip] = {
+            'first_seen': data['first_seen'],
+            'last_seen': data['last_seen'],
+            'request_count': data['request_count'],
+            'attack_types': list(data['attack_types']),
+            'targeted_resources': list(data['targeted_resources']),
+            'status_codes': dict(data['status_codes']),
+            'user_agent_count': len(data['user_agents']),
+            'sample_user_agents': list(data['user_agents'])[:5]
+        }
+    
+    with open('/home/claude/dec2021_ip_analysis.json', 'w') as f:
+        json.dump(export_data, f, indent=2)
+    
+    print("[OK] JSON export complete: /home/claude/dec2021_ip_analysis.json")
+    print()
+
+if __name__ == '__main__':
+    access_log = '/mnt/user-data/uploads/log.1'
+    error_log = '/mnt/user-data/uploads/error_log.1'
+    
+    analyze_logs(access_log, error_log)
