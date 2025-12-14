@@ -60,7 +60,7 @@ class TelegramScreenshotAnalyzer:
         self.key_terms = [
             "bot", "bots", "ip", "vpn", "email", "swat", "grock", "grok",
             "docket", "court", "transcript", "affidavit", "judge", "attorney",
-            "spam", "harassment", "Lu", "Kathy", "traced", "mask", "yandex",
+            "spam", "harassment", "traced", "mask", "yandex",
             "welfare check", "suicide", "police", "FBI", "federal",
             "hire", "pay", "money", "fee", "case", "lawsuit", "litigation",
             "target", "victim", "attack", "raid", "doxx", "swat"
