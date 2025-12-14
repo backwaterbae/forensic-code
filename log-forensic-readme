@@ -1,0 +1,456 @@
+# ApacheLog py ReadMe
+## Python Tools for Email and Server Breach Investigation
+
+Created for analyzing December 2021 breach logs and email forensics
+Developed by: Lu Esposito (MS Digital Forensics)
+
+---
+
+## Two Scripts, Two Purposes
+
+### 1. **analyze_dec2021_logs.py** - SERVER LOG ANALYZER
+**Best for:** Analyzing Apache access logs and ModSecurity error logs
+
+**What it does:**
+- Parses Apache access logs (combined format)
+- Parses ModSecurity error logs
+- Extracts all IP addresses and their activity
+- Identifies attack patterns (XMLRPC, phpMyAdmin, enumeration)
+- Creates timeline of attacks
+- Cross-references against known breach IPs
+- Exports detailed JSON report
+
+**Usage:**
+```bash
+# Customize the file paths in the script if needed
+python analyze_dec2021_logs.py
+```
+
+**Default paths (edit in script if different):**
+```python
+access_log = '/mnt/user-data/uploads/luesposito_com_log.1'
+error_log = '/mnt/user-data/uploads/luesposito_com_error_log.1'
+```
+
+**Output files:**
+- Console output with detailed analysis
+- `dec2021_ip_analysis.json` - Complete IP activity data
+
+**Attack types detected:**
+- XMLRPC brute force attempts
+- phpMyAdmin access attempts
+- WordPress API enumeration
+- User enumeration attempts
+- Any patterns blocked by ModSecurity
+
+**When to use:**
+- Analyzing server logs for breach activity
+- Identifying reconnaissance patterns
+- Correlating attack timing with known breach dates
+- Creating evidence timeline
+
+---
+
+### 2. **extract_email_ips.py** - EMAIL HEADER PARSER
+**Best for:** Extracting IP addresses from email files for forensic analysis
+
+**What it does:**
+- Reads .eml email files
+- Parses all email headers
+- Extracts IP addresses from:
+  - Received headers (routing path)
+  - X-Originating-IP
+  - X-Forwarded-For
+  - X-Sender-IP, X-Source-IP, X-Real-IP, X-Client-IP
+- Shows complete email routing chain
+- Exports to CSV spreadsheet
+
+**Usage:**
+```bash
+# Place .eml files in /home/claude/ directory
+python extract_email_ips.py
+```
+
+**Output files:**
+- `email_ips_extracted.csv` - All IPs with metadata
+
+**CSV columns:**
+- Email_File - Which email file
+- Email_From - Sender
+- Email_To - Recipient
+- Email_Subject - Subject line
+- Email_Date - Date sent
+- IP_Address - Extracted IP
+- Hostname - Associated hostname
+- Source_Header - Which header (Received-1, X-Originating-IP, etc)
+- Header_Type - Type of header
+- Description - Raw header content
+
+**When to use:**
+- Analyzing phishing emails
+- Tracking email origins
+- Identifying spoofed senders
+- Building evidence of email-based attacks
+
+---
+
+## Installation & Requirements
+
+### Required Python Packages:
+```bash
+# No additional packages needed! Uses Python standard library only
+```
+
+### System Requirements:
+- Python 3.6 or higher
+- Works on Windows, Mac, Linux
+
+---
+
+## Quick Start Guide
+
+### For Server Logs:
+
+**Step 1: Place log files**
+```bash
+# Put your logs in /mnt/user-data/uploads/ or edit paths in script
+luesposito_com_log.1        # Apache access log
+luesposito_com_error_log.1  # ModSecurity error log
+```
+
+**Step 2: Run**
+```bash
+python analyze_dec2021_logs.py
+```
+
+**Step 3: Review outputs**
+- Console shows detailed analysis
+- Open `dec2021_ip_analysis.json` for machine-readable data
+- Use JSON data for further processing/visualization
+
+---
+
+### For Email Files:
+
+**Step 1: Place .eml files**
+```bash
+# Put email files in /home/claude/
+email1.eml
+email2.eml
+phishing_attempt.eml
+```
+
+**Step 2: Run**
+```bash
+python extract_email_ips.py
+```
+
+**Step 3: Review CSV**
+- Open `email_ips_extracted.csv` in Excel/Google Sheets
+- Sort by IP_Address to find patterns
+- Cross-reference IPs with known malicious IPs
+
+---
+
+## What These Scripts Tell You
+
+### Server Log Analysis
+
+**IP Activity:**
+- Who accessed your server
+- When they accessed it (first/last seen)
+- How many requests they made
+- What they requested (URLs, files)
+- Success/failure (HTTP status codes)
+
+**Attack Patterns:**
+- XMLRPC brute force (WordPress attacks)
+- phpMyAdmin access attempts (database targeting)
+- User enumeration (reconnaissance)
+- Any blocked attacks (ModSecurity detections)
+
+**Timeline:**
+- Daily activity breakdown
+- Peak attack times
+- Coordinated attack patterns
+
+**Breach Correlation:**
+- Checks for your known breach IPs:
+  - 75.188.81.189 (Dec 27 - Columbus Spectrum)
+  - 117.2.24.53 (Dec 27 - Vietnam)
+  - 92.119.18.51 (Jan 4 - PacketHub VPN)
+  - 195.22.221.210 (Jan 22 - Chile)
+  - 103.88.113.62 (Jan 22 - Vietnam #2)
+  - 52.142.51.9 (Jan 22 - Azure)
+
+### Email IP Analysis
+
+**Routing Information:**
+- Complete path email took from sender to you
+- Each mail server IP in the chain
+- Mail server hostnames
+- Potential spoofing indicators
+
+**Origin Detection:**
+- True sender IP (not just "From:" header)
+- Proxy/forwarding IPs
+- Geographic indicators
+
+**Evidence Value:**
+- Proves email origin
+- Shows manipulation attempts
+- Links emails to specific IPs/servers
+
+---
+
+## Understanding the Output
+
+### analyze_dec2021_logs.py Output
+
+**Console sections:**
+1. **Analysis Results** - Total IPs detected
+2. **Detailed IP Analysis** - Top 10 IPs by activity
+   - First/last seen timestamps
+   - Request count
+   - Attack types identified
+   - HTTP status codes
+   - User agents
+3. **Known Breach IPs** - Matches with your breach IPs
+4. **Temporal Patterns** - Daily activity breakdown
+
+**JSON structure:**
+```json
+{
+  "IP_ADDRESS": {
+    "first_seen": "22/Dec/2021:04:05:33 -0500",
+    "last_seen": "22/Dec/2021:04:07:22 -0500",
+    "request_count": 283,
+    "attack_types": ["XMLRPC Brute Force", "User Enumeration"],
+    "targeted_resources": ["xmlrpc.php", "/wp-json/"],
+    "status_codes": {"200": 280, "404": 3},
+    "user_agent_count": 1,
+    "sample_user_agents": ["..."]
+  }
+}
+```
+
+### extract_email_ips.py Output
+
+**Console output:**
+- Filename being processed
+- Email metadata (from, to, subject, date)
+- Number of IPs found
+- List of IPs with header types
+
+**CSV example:**
+```
+Email_File,Email_From,Email_To,Email_Subject,IP_Address,Header_Type
+phishing.eml,fake@attacker.com,you@victim.com,Urgent!,192.168.1.1,X-Originating-IP
+phishing.eml,fake@attacker.com,you@victim.com,Urgent!,52.142.51.9,Received-from
+```
+
+---
+
+## Customizing the Scripts
+
+### Change Known Breach IPs
+In `analyze_dec2021_logs.py`, edit this section:
+
+```python
+known_breach_ips = {
+    '75.188.81.189': 'Dec 27 Reconnaissance IP (Columbus Spectrum)',
+    # Add your IPs here:
+    '1.2.3.4': 'Description of this IP',
+    '5.6.7.8': 'Another suspicious IP'
+}
+```
+
+### Change Log File Paths
+In `analyze_dec2021_logs.py`, edit at bottom:
+
+```python
+access_log = '/path/to/your/access.log'
+error_log = '/path/to/your/error.log'
+```
+
+### Change Email Directory
+In `extract_email_ips.py`, edit this line:
+
+```python
+eml_files = glob.glob('/your/directory/*.eml')
+```
+
+### Add More Attack Patterns
+In `analyze_dec2021_logs.py`, add to this section:
+
+```python
+# Identify attack patterns
+request_lower = entry['request'].lower()
+if 'xmlrpc' in request_lower:
+    ip_data['attack_types'].add('XMLRPC Brute Force')
+# Add your patterns:
+if 'your_pattern' in request_lower:
+    ip_data['attack_types'].add('Your Attack Type')
+```
+
+---
+
+## Troubleshooting
+
+### "File not found"
+**Solution:**
+```bash
+# Check your file paths
+ls -l /mnt/user-data/uploads/
+# Edit script to match actual filenames
+```
+
+### "Permission denied"
+**Solution:**
+```bash
+# Make sure files are readable
+chmod 644 /path/to/logfile
+```
+
+### "No .eml files found"
+**Solution:**
+```bash
+# Check directory
+ls /home/claude/*.eml
+# Or edit script to point to correct directory
+```
+
+### Empty output / No IPs found
+**Causes:**
+- Log format doesn't match expected format
+- Email headers don't contain IPs (unlikely)
+- Filtering is too aggressive
+
+**Solution:**
+- Check sample log entries manually
+- Verify Apache log format is "Combined"
+- Adjust regex patterns if needed
+
+---
+
+## For Your Investigation
+
+### Evidence Package Includes:
+- Server logs (raw files)
+- Parsed IP data (JSON)
+- Email files (.eml)
+- Extracted email IPs (CSV)
+- Cross-reference analysis
+
+### Key Forensic Value:
+
+**Server Logs:**
+- Proves timeline of attacks
+- Shows reconnaissance before breach
+- Demonstrates sustained campaign
+- Identifies attack vectors used
+
+**Email IPs:**
+- Proves email origins
+- Shows spoofing attempts
+- Links emails to infrastructure
+- Traces phishing campaigns
+
+### Legal Significance:
+
+**For Criminal Prosecution:**
+- Timeline evidence (when attacks occurred)
+- Attribution evidence (who conducted attacks)
+- Intent evidence (sustained, targeted nature)
+- Technical evidence (specific attack methods)
+
+**For Civil Litigation:**
+- Proves damages (scope of breach)
+- Shows negligence (if applicable)
+- Demonstrates targeting
+- Establishes pattern of harassment
+
+---
+
+## Advanced Usage
+
+### Combining Both Scripts
+
+**Workflow:**
+1. Analyze server logs → Get suspicious IPs
+2. Analyze emails → Get sender IPs
+3. Cross-reference: Are any email IPs in your log attackers?
+
+**Example Python script to combine:**
+```python
+import json
+import csv
+
+# Load log analysis results
+with open('dec2021_ip_analysis.json') as f:
+    log_ips = json.load(f)
+
+# Load email IPs
+email_ips = set()
+with open('email_ips_extracted.csv') as f:
+    reader = csv.DictReader(f)
+    for row in reader:
+        email_ips.add(row['IP_Address'])
+
+# Find matches
+matches = []
+for ip in email_ips:
+    if ip in log_ips:
+        matches.append({
+            'ip': ip,
+            'log_activity': log_ips[ip],
+            'found_in': 'Both logs and emails'
+        })
+
+print(f"Found {len(matches)} IPs in BOTH logs and emails")
+for match in matches:
+    print(f"  {match['ip']}: {match['log_activity']['request_count']} requests")
+```
+
+### Automating Analysis
+
+**Create batch script:**
+```bash
+#!/bin/bash
+# analyze_all_logs.sh
+
+for logfile in /logs/*.log; do
+    echo "Processing $logfile"
+    python analyze_dec2021_logs.py "$logfile"
+done
+```
+
+---
+
+## Questions or Issues?
+
+These scripts are designed to handle standard Apache/ModSecurity logs and RFC-compliant email files. They use only Python standard library for maximum compatibility.
+
+**Need modifications?** Let me know what log format you have or what additional analysis you need.
+
+**Want to add features?** Tell me what patterns you want to detect or what data you want to extract.
+
+---
+
+## Script Comparison Chart
+
+| Feature | analyze_dec2021_logs | extract_email_ips |
+|---------|---------------------|-------------------|
+| **Input** | Server logs | Email files (.eml) |
+| **Output** | JSON + Console | CSV + Console |
+| **Analyzes** | Access patterns | Email routing |
+| **Detects** | Attack types | IP origins |
+| **Timeline** | Daily activity | Per-email |
+| **Cross-ref** | Breach IPs | N/A |
+| **Best For** | Server forensics | Email forensics |
+
+---
+
+**Created: December 2025**  
+**Version: 1.0**  
+**License: Use freely for your investigation**
