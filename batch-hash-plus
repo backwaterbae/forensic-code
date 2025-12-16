@@ -1,0 +1,519 @@
+#!/usr/bin/env python3
+"""
+Forensic File Hasher - Multi-core file integrity verification tool
+Supports multiple hash algorithms, recursive scanning, and detailed reporting
+"""
+
+import hashlib
+import os
+import sys
+import time
+import argparse
+import logging
+import csv
+import json
+from pathlib import Path
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from typing import Dict, List, Optional, Tuple
+from datetime import datetime
+
+# Optional progress bar
+try:
+    from tqdm import tqdm
+    HAS_TQDM = True
+except ImportError:
+    HAS_TQDM = False
+    def tqdm(iterable, *args, **kwargs):
+        return iterable
+
+
+class ForensicHasher:
+    """Multi-algorithm file hasher for forensic analysis"""
+    
+    # Supported hash algorithms
+    ALGORITHMS = {
+        'md5': hashlib.md5,
+        'sha1': hashlib.sha1,
+        'sha256': hashlib.sha256,
+        'sha512': hashlib.sha512
+    }
+    
+    # Default chunk size for reading large files (64KB)
+    CHUNK_SIZE = 65536
+    
+    def __init__(self, algorithms: List[str] = None, chunk_size: int = None):
+        """
+        Initialize forensic hasher
+        
+        Args:
+            algorithms: List of hash algorithms to use (default: ['sha256'])
+            chunk_size: Chunk size for reading files in bytes (default: 64KB)
+        """
+        if algorithms is None:
+            algorithms = ['sha256']
+        
+        # Validate algorithms
+        for alg in algorithms:
+            if alg not in self.ALGORITHMS:
+                raise ValueError(f"Unsupported algorithm: {alg}")
+        
+        self.algorithms = algorithms
+        self.chunk_size = chunk_size or self.CHUNK_SIZE
+        
+        # Setup logging
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s'
+        )
+        self.logger = logging.getLogger(__name__)
+    
+    def hash_file(self, filepath: Path) -> Dict:
+        """
+        Hash a single file using all configured algorithms
+        
+        Args:
+            filepath: Path to file
+            
+        Returns:
+            Dictionary with file metadata and hashes
+        """
+        result = {
+            'filepath': str(filepath),
+            'filename': filepath.name,
+            'success': False,
+            'error': None,
+            'size': None,
+            'modified': None,
+            'accessed': None,
+            'created': None,
+        }
+        
+        # Initialize result with all hash keys
+        for alg in self.algorithms:
+            result[alg] = None
+        
+        try:
+            # Get file stats
+            stats = filepath.stat()
+            result['size'] = stats.st_size
+            result['modified'] = datetime.fromtimestamp(stats.st_mtime).isoformat()
+            result['accessed'] = datetime.fromtimestamp(stats.st_atime).isoformat()
+            result['created'] = datetime.fromtimestamp(stats.st_ctime).isoformat()
+            
+            # Initialize hashers
+            hashers = {alg: self.ALGORITHMS[alg]() for alg in self.algorithms}
+            
+            # Read and hash file in chunks (memory efficient)
+            with open(filepath, 'rb') as f:
+                while True:
+                    chunk = f.read(self.chunk_size)
+                    if not chunk:
+                        break
+                    
+                    # Update all hashers
+                    for hasher in hashers.values():
+                        hasher.update(chunk)
+            
+            # Get digests
+            for alg, hasher in hashers.items():
+                result[alg] = hasher.hexdigest()
+            
+            result['success'] = True
+            
+        except PermissionError as e:
+            result['error'] = f"Permission denied: {e}"
+            self.logger.warning(f"Permission denied: {filepath}")
+        except FileNotFoundError as e:
+            result['error'] = f"File not found: {e}"
+            self.logger.warning(f"File not found: {filepath}")
+        except Exception as e:
+            result['error'] = f"Error: {type(e).__name__}: {e}"
+            self.logger.error(f"Error hashing {filepath}: {e}")
+        
+        return result
+    
+    def scan_directory(self, directory: Path, recursive: bool = True,
+                      pattern: str = "*") -> List[Path]:
+        """
+        Scan directory for files
+        
+        Args:
+            directory: Directory to scan
+            recursive: Scan subdirectories
+            pattern: File pattern to match (e.g., "*.exe", "*.dll")
+            
+        Returns:
+            List of file paths
+        """
+        files = []
+        
+        try:
+            if recursive:
+                # Recursive search
+                files = list(directory.rglob(pattern))
+            else:
+                # Single directory
+                files = list(directory.glob(pattern))
+            
+            # Filter to only files (not directories)
+            files = [f for f in files if f.is_file()]
+            
+        except PermissionError:
+            self.logger.error(f"Permission denied accessing: {directory}")
+        except Exception as e:
+            self.logger.error(f"Error scanning directory {directory}: {e}")
+        
+        return files
+    
+    def hash_directory(self, directory: str, recursive: bool = True,
+                      pattern: str = "*", max_workers: int = None) -> List[Dict]:
+        """
+        Hash all files in a directory using multiprocessing
+        
+        Args:
+            directory: Directory path to scan
+            recursive: Scan subdirectories
+            pattern: File pattern to match
+            max_workers: Number of worker processes (default: CPU count)
+            
+        Returns:
+            List of result dictionaries
+        """
+        dir_path = Path(directory)
+        
+        if not dir_path.exists():
+            raise FileNotFoundError(f"Directory not found: {directory}")
+        
+        if not dir_path.is_dir():
+            raise NotADirectoryError(f"Not a directory: {directory}")
+        
+        self.logger.info(f"Scanning directory: {directory}")
+        self.logger.info(f"Recursive: {recursive}")
+        self.logger.info(f"Pattern: {pattern}")
+        
+        # Scan for files
+        files = self.scan_directory(dir_path, recursive=recursive, pattern=pattern)
+        
+        if not files:
+            self.logger.warning("No files found to hash")
+            return []
+        
+        self.logger.info(f"Found {len(files)} file(s) to process")
+        
+        # Calculate total size
+        total_size = sum(f.stat().st_size for f in files if f.exists())
+        self.logger.info(f"Total size: {total_size:,} bytes ({total_size/(1024**3):.2f} GB)")
+        
+        # Determine worker count
+        if max_workers is None:
+            max_workers = os.cpu_count()
+        
+        self.logger.info(f"Using {max_workers} worker processes")
+        
+        # Process files
+        results = []
+        start_time = time.time()
+        
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            # Submit all tasks
+            future_to_file = {
+                executor.submit(self.hash_file, file): file 
+                for file in files
+            }
+            
+            # Progress tracking
+            if HAS_TQDM:
+                futures = tqdm(as_completed(future_to_file), total=len(files),
+                             desc="Hashing files", unit="file")
+            else:
+                futures = as_completed(future_to_file)
+            
+            # Collect results
+            for future in futures:
+                try:
+                    result = future.result()
+                    results.append(result)
+                except Exception as e:
+                    file = future_to_file[future]
+                    self.logger.error(f"Failed to process {file}: {e}")
+                    results.append({
+                        'filepath': str(file),
+                        'filename': file.name,
+                        'success': False,
+                        'error': str(e)
+                    })
+        
+        elapsed_time = time.time() - start_time
+        
+        # Summary
+        successful = sum(1 for r in results if r['success'])
+        failed = len(results) - successful
+        
+        self.logger.info(f"\n{'='*60}")
+        self.logger.info(f"Hashing Complete!")
+        self.logger.info(f"Total files: {len(results)}")
+        self.logger.info(f"Successful: {successful}")
+        self.logger.info(f"Failed: {failed}")
+        self.logger.info(f"Elapsed time: {elapsed_time:.2f} seconds")
+        
+        if total_size > 0:
+            throughput = total_size / elapsed_time / (1024**2)  # MB/s
+            self.logger.info(f"Throughput: {throughput:.2f} MB/s")
+        
+        self.logger.info(f"{'='*60}\n")
+        
+        return results
+    
+    def save_results(self, results: List[Dict], output_file: str, format: str = 'csv'):
+        """
+        Save results to file
+        
+        Args:
+            results: List of result dictionaries
+            output_file: Output file path
+            format: Output format ('csv' or 'json')
+        """
+        output_path = Path(output_file)
+        
+        if format.lower() == 'csv':
+            self._save_csv(results, output_path)
+        elif format.lower() == 'json':
+            self._save_json(results, output_path)
+        else:
+            raise ValueError(f"Unsupported format: {format}")
+        
+        self.logger.info(f"Results saved to: {output_path}")
+    
+    def _save_csv(self, results: List[Dict], output_path: Path):
+        """Save results to CSV file"""
+        if not results:
+            return
+        
+        # Get all keys from first result
+        fieldnames = list(results[0].keys())
+        
+        with open(output_path, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(results)
+    
+    def _save_json(self, results: List[Dict], output_path: Path):
+        """Save results to JSON file"""
+        with open(output_path, 'w', encoding='utf-8') as f:
+            json.dump(results, f, indent=2)
+    
+    def verify_hashes(self, results_file: str) -> Dict:
+        """
+        Verify files against previously computed hashes
+        
+        Args:
+            results_file: Path to previous results file (CSV or JSON)
+            
+        Returns:
+            Verification summary
+        """
+        results_path = Path(results_file)
+        
+        # Load previous results
+        if results_path.suffix.lower() == '.json':
+            with open(results_path, 'r') as f:
+                previous_results = json.load(f)
+        else:
+            with open(results_path, 'r', newline='', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                previous_results = list(reader)
+        
+        self.logger.info(f"Loaded {len(previous_results)} previous results")
+        self.logger.info("Re-hashing files for verification...")
+        
+        # Build file-to-hash mapping
+        previous_hashes = {
+            r['filepath']: r 
+            for r in previous_results 
+            if r.get('success') == 'True' or r.get('success') is True
+        }
+        
+        # Re-hash files
+        files = [Path(fp) for fp in previous_hashes.keys() if Path(fp).exists()]
+        
+        verification = {
+            'total_files': len(previous_hashes),
+            'files_found': len(files),
+            'files_missing': len(previous_hashes) - len(files),
+            'verified': 0,
+            'modified': 0,
+            'errors': 0,
+            'details': []
+        }
+        
+        for file in tqdm(files, desc="Verifying"):
+            result = self.hash_file(file)
+            previous = previous_hashes[str(file)]
+            
+            detail = {
+                'filepath': str(file),
+                'status': 'unknown'
+            }
+            
+            if not result['success']:
+                detail['status'] = 'error'
+                detail['error'] = result['error']
+                verification['errors'] += 1
+            else:
+                # Compare hashes
+                match = True
+                for alg in self.algorithms:
+                    if alg in previous and previous[alg]:
+                        if result[alg] != previous[alg]:
+                            match = False
+                            detail['status'] = 'modified'
+                            detail['algorithm'] = alg
+                            detail['previous_hash'] = previous[alg]
+                            detail['current_hash'] = result[alg]
+                            break
+                
+                if match:
+                    detail['status'] = 'verified'
+                    verification['verified'] += 1
+                else:
+                    verification['modified'] += 1
+            
+            verification['details'].append(detail)
+        
+        # Report missing files
+        for filepath in previous_hashes.keys():
+            if not Path(filepath).exists():
+                verification['details'].append({
+                    'filepath': filepath,
+                    'status': 'missing'
+                })
+        
+        # Print summary
+        self.logger.info(f"\n{'='*60}")
+        self.logger.info("Verification Complete!")
+        self.logger.info(f"Total files in baseline: {verification['total_files']}")
+        self.logger.info(f"Files found: {verification['files_found']}")
+        self.logger.info(f"Files missing: {verification['files_missing']}")
+        self.logger.info(f"Verified (unchanged): {verification['verified']}")
+        self.logger.info(f"Modified: {verification['modified']}")
+        self.logger.info(f"Errors: {verification['errors']}")
+        self.logger.info(f"{'='*60}\n")
+        
+        return verification
+
+
+def main():
+    """Main function with CLI"""
+    parser = argparse.ArgumentParser(
+        description='Forensic File Hasher - Multi-core file integrity verification',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  # Hash all files in directory (SHA-256)
+  python file_hasher.py -d /evidence/case001 -o results.csv
+  
+  # Recursive with multiple algorithms
+  python file_hasher.py -d /evidence -r -a md5 sha1 sha256 -o hashes.csv
+  
+  # Hash specific file types
+  python file_hasher.py -d /program_files -p "*.exe" -o executables.csv
+  
+  # Verify against baseline
+  python file_hasher.py --verify baseline.csv -o verification.json
+  
+  # Use all CPU cores
+  python file_hasher.py -d /data -w 0 -o results.csv
+        """
+    )
+    
+    # Main operation mode
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument('-d', '--directory',
+                      help='Directory to hash')
+    group.add_argument('--verify',
+                      help='Verify files against previous results file')
+    
+    # Hash options
+    parser.add_argument('-a', '--algorithms',
+                       nargs='+',
+                       choices=['md5', 'sha1', 'sha256', 'sha512'],
+                       default=['sha256'],
+                       help='Hash algorithms to use (default: sha256)')
+    
+    parser.add_argument('-r', '--recursive',
+                       action='store_true',
+                       help='Scan directories recursively')
+    
+    parser.add_argument('-p', '--pattern',
+                       default='*',
+                       help='File pattern to match (e.g., *.exe, *.dll)')
+    
+    parser.add_argument('-w', '--workers',
+                       type=int,
+                       help='Number of worker processes (default: CPU count, 0=all CPUs)')
+    
+    parser.add_argument('-c', '--chunk-size',
+                       type=int,
+                       default=65536,
+                       help='Chunk size for reading files in bytes (default: 64KB)')
+    
+    # Output options
+    parser.add_argument('-o', '--output',
+                       required=True,
+                       help='Output file path')
+    
+    parser.add_argument('-f', '--format',
+                       choices=['csv', 'json'],
+                       default='csv',
+                       help='Output format (default: csv)')
+    
+    args = parser.parse_args()
+    
+    # Handle workers
+    workers = args.workers
+    if workers == 0:
+        workers = os.cpu_count()
+    
+    # Create hasher
+    hasher = ForensicHasher(
+        algorithms=args.algorithms,
+        chunk_size=args.chunk_size
+    )
+    
+    # Execute
+    if args.directory:
+        # Hash directory
+        results = hasher.hash_directory(
+            directory=args.directory,
+            recursive=args.recursive,
+            pattern=args.pattern,
+            max_workers=workers
+        )
+        
+        # Save results
+        hasher.save_results(results, args.output, format=args.format)
+        
+    else:
+        # Verify mode
+        verification = hasher.verify_hashes(args.verify)
+        hasher.save_results(verification['details'], args.output, format=args.format)
+        
+        # Print modified files
+        if verification['modified'] > 0:
+            print("\nModified files:")
+            for detail in verification['details']:
+                if detail['status'] == 'modified':
+                    print(f"  {detail['filepath']}")
+        
+        # Print missing files
+        if verification['files_missing'] > 0:
+            print("\nMissing files:")
+            for detail in verification['details']:
+                if detail['status'] == 'missing':
+                    print(f"  {detail['filepath']}")
+    
+    return 0
+
+
+if __name__ == '__main__':
+    sys.exit(main())
