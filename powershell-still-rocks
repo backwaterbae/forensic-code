@@ -94,7 +94,7 @@ if ($ListOnly) {
     Show-AllDisks
     Write-Host "`nOnce you have your disk and partition numbers, run:`n" -ForegroundColor Yellow
     Write-Host "  .\Merge-Partitions.ps1 -DiskNumber <N> -KeepPartitionNumber <X> -RemovePartitionNumber <Y>`n" -ForegroundColor White
-    exit 0
+    return
 }
  
 # ──────────────────────────────────────────────
@@ -106,7 +106,7 @@ if (-not $PSBoundParameters.ContainsKey('DiskNumber') -or
     -not $PSBoundParameters.ContainsKey('RemovePartitionNumber')) {
     Write-Error "You must provide -DiskNumber, -KeepPartitionNumber, and -RemovePartitionNumber, or use -ListOnly."
     Write-Host "`nRun '.\Merge-Partitions.ps1 -ListOnly' to see available disks and partition numbers." -ForegroundColor Yellow
-    exit 1
+    return
 }
  
 # ──────────────────────────────────────────────
@@ -115,7 +115,7 @@ if (-not $PSBoundParameters.ContainsKey('DiskNumber') -or
 $disk = Get-Disk -Number $DiskNumber -ErrorAction SilentlyContinue
 if (-not $disk) {
     Write-Error "Disk $DiskNumber not found. Run with -ListOnly to see available disks."
-    exit 1
+    return
 }
  
 Show-DiskLayout -Disk $DiskNumber
@@ -128,15 +128,15 @@ $removePart = Get-Partition -DiskNumber $DiskNumber -PartitionNumber $RemovePart
  
 if (-not $keepPart) {
     Write-Error "Partition $KeepPartitionNumber not found on Disk $DiskNumber."
-    exit 1
+    return
 }
 if (-not $removePart) {
     Write-Error "Partition $RemovePartitionNumber not found on Disk $DiskNumber."
-    exit 1
+    return
 }
 if ($KeepPartitionNumber -eq $RemovePartitionNumber) {
     Write-Error "Keep and Remove partition numbers cannot be the same."
-    exit 1
+    return
 }
  
 # ──────────────────────────────────────────────
@@ -144,9 +144,7 @@ if ($KeepPartitionNumber -eq $RemovePartitionNumber) {
 # The kept partition must immediately precede the one being removed.
 # (Windows can only extend a partition into space directly after it.)
 # ──────────────────────────────────────────────
-$keepEnd   = $keepPart.Offset   + $keepPart.Size
-$removeEnd = $removePart.Offset + $removePart.Size
- 
+$keepEnd  = $keepPart.Offset + $keepPart.Size
 $gapBytes = $removePart.Offset - $keepEnd
  
 if ($removePart.Offset -lt $keepPart.Offset) {
@@ -155,7 +153,7 @@ if ($removePart.Offset -lt $keepPart.Offset) {
                  "Swap your -KeepPartitionNumber and -RemovePartitionNumber, OR use a third-party tool like GParted.") `
         -f $RemovePartitionNumber, [math]::Round($removePart.Offset/1MB,1),
            $KeepPartitionNumber,   [math]::Round($keepPart.Offset/1MB,1)
-    exit 1
+    return
 }
  
 if ($gapBytes -gt 10MB) {
@@ -170,11 +168,11 @@ if ($gapBytes -gt 10MB) {
 $protectedTypes = @('System', 'Reserved', 'Recovery', 'Unknown')
 if ($removePart.Type -in $protectedTypes) {
     Write-Error ("Partition $RemovePartitionNumber is type '$($removePart.Type)' — removing it could make your system unbootable. Aborting.")
-    exit 1
+    return
 }
 if ($removePart.IsSystem -or $removePart.IsBoot -or $removePart.IsActive) {
     Write-Error "Partition $RemovePartitionNumber is flagged as a system/boot/active partition. Aborting to protect bootability."
-    exit 1
+    return
 }
  
 # ──────────────────────────────────────────────
@@ -203,7 +201,7 @@ Write-Host "  ⚠  This cannot be undone. Make sure you have a backup.`n" -Foreg
 $confirm = Read-Host "Type  YES  to proceed, anything else to abort"
 if ($confirm -ne "YES") {
     Write-Host "`nAborted. No changes were made." -ForegroundColor Yellow
-    exit 0
+    return
 }
  
 # ──────────────────────────────────────────────
@@ -216,7 +214,7 @@ try {
 } catch {
     Write-Error "Failed to remove partition: $_"
     Write-Host "No further changes were made." -ForegroundColor Yellow
-    exit 1
+    return
 }
  
 # ──────────────────────────────────────────────
@@ -236,7 +234,7 @@ try {
     Write-Host "You can recover it manually:" -ForegroundColor Yellow
     Write-Host "  1. Open Disk Management (diskmgmt.msc)" -ForegroundColor White
     Write-Host "  2. Right-click Partition $KeepPartitionNumber → 'Extend Volume...'" -ForegroundColor White
-    exit 1
+    return
 }
  
 # ──────────────────────────────────────────────
