@@ -1,0 +1,255 @@
+#Requires -RunAsAdministrator
+<#
+.SYNOPSIS
+    Merges two adjacent partitions on a Windows disk.
+ 
+.DESCRIPTION
+    Removes one partition and extends the adjacent partition to fill the freed space.
+ 
+    REQUIREMENTS:
+      - Both partitions must be on the same disk
+      - The partition being removed must be adjacent to (and after) the one being kept
+      - Run as Administrator
+ 
+    DATA WARNING:
+      All data on the partition being REMOVED will be PERMANENTLY LOST.
+      If you need data from both partitions, copy it to the keeper partition first.
+ 
+    COMPATIBILITY:
+      Windows 8 / Server 2012 and later (uses the Storage PowerShell module).
+ 
+.PARAMETER DiskNumber
+    The disk number. Run with -ListOnly to see available disks and partitions.
+ 
+.PARAMETER KeepPartitionNumber
+    The partition number to KEEP and extend into the freed space.
+ 
+.PARAMETER RemovePartitionNumber
+    The partition number to DELETE. Its space will be absorbed by the kept partition.
+ 
+.PARAMETER ListOnly
+    Just list all disks and their partitions, then exit. Use this to find your disk/partition numbers.
+ 
+.EXAMPLE
+    # Step 1: See what you're working with
+    .\Merge-Partitions.ps1 -ListOnly
+ 
+    # Step 2: Merge (keep partition 3, remove partition 4, on disk 0)
+    .\Merge-Partitions.ps1 -DiskNumber 0 -KeepPartitionNumber 3 -RemovePartitionNumber 4
+#>
+ 
+[CmdletBinding(SupportsShouldProcess)]
+param(
+    [switch]$ListOnly,
+ 
+    [Parameter(Mandatory = $false)]
+    [int]$DiskNumber,
+ 
+    [Parameter(Mandatory = $false)]
+    [int]$KeepPartitionNumber,
+ 
+    [Parameter(Mandatory = $false)]
+    [int]$RemovePartitionNumber
+)
+ 
+# ──────────────────────────────────────────────
+# HELPER: Pretty-print all disks and partitions
+# ──────────────────────────────────────────────
+function Show-AllDisks {
+    $disks = Get-Disk | Sort-Object Number
+    foreach ($d in $disks) {
+        $sizeGB = [math]::Round($d.Size / 1GB, 1)
+        Write-Host "`n=== Disk $($d.Number): $($d.FriendlyName)  ($sizeGB GB)  [$($d.PartitionStyle)] ===" -ForegroundColor Cyan
+        $partitions = Get-Partition -DiskNumber $d.Number -ErrorAction SilentlyContinue
+        if ($partitions) {
+            $partitions | Sort-Object PartitionNumber | Format-Table -AutoSize @(
+                @{Label='#';       Expression={$_.PartitionNumber}},
+                @{Label='Letter';  Expression={if ($_.DriveLetter) {$_.DriveLetter} else {'—'}}},
+                @{Label='Size';    Expression={"$([math]::Round($_.Size/1GB,2)) GB"}},
+                @{Label='Offset';  Expression={"$([math]::Round($_.Offset/1MB,1)) MB"}},
+                @{Label='Type';    Expression={$_.Type}}
+            )
+        } else {
+            Write-Host "  (no partitions found)" -ForegroundColor DarkGray
+        }
+    }
+}
+ 
+function Show-DiskLayout {
+    param([int]$Disk)
+    Write-Host "`n=== Disk $Disk — Current Layout ===" -ForegroundColor Cyan
+    Get-Partition -DiskNumber $Disk | Sort-Object PartitionNumber | Format-Table -AutoSize @(
+        @{Label='#';       Expression={$_.PartitionNumber}},
+        @{Label='Letter';  Expression={if ($_.DriveLetter) {$_.DriveLetter} else {'—'}}},
+        @{Label='Size';    Expression={"$([math]::Round($_.Size/1GB,2)) GB"}},
+        @{Label='Offset';  Expression={"$([math]::Round($_.Offset/1MB,1)) MB"}},
+        @{Label='Type';    Expression={$_.Type}}
+    )
+}
+ 
+# ──────────────────────────────────────────────
+# LIST-ONLY MODE
+# ──────────────────────────────────────────────
+if ($ListOnly) {
+    Show-AllDisks
+    Write-Host "`nOnce you have your disk and partition numbers, run:`n" -ForegroundColor Yellow
+    Write-Host "  .\Merge-Partitions.ps1 -DiskNumber <N> -KeepPartitionNumber <X> -RemovePartitionNumber <Y>`n" -ForegroundColor White
+    exit 0
+}
+ 
+# ──────────────────────────────────────────────
+# VALIDATE REQUIRED PARAMS (not using Mandatory
+# so we can offer -ListOnly without them)
+# ──────────────────────────────────────────────
+if (-not $PSBoundParameters.ContainsKey('DiskNumber') -or
+    -not $PSBoundParameters.ContainsKey('KeepPartitionNumber') -or
+    -not $PSBoundParameters.ContainsKey('RemovePartitionNumber')) {
+    Write-Error "You must provide -DiskNumber, -KeepPartitionNumber, and -RemovePartitionNumber, or use -ListOnly."
+    Write-Host "`nRun '.\Merge-Partitions.ps1 -ListOnly' to see available disks and partition numbers." -ForegroundColor Yellow
+    exit 1
+}
+ 
+# ──────────────────────────────────────────────
+# VALIDATE DISK
+# ──────────────────────────────────────────────
+$disk = Get-Disk -Number $DiskNumber -ErrorAction SilentlyContinue
+if (-not $disk) {
+    Write-Error "Disk $DiskNumber not found. Run with -ListOnly to see available disks."
+    exit 1
+}
+ 
+Show-DiskLayout -Disk $DiskNumber
+ 
+# ──────────────────────────────────────────────
+# VALIDATE PARTITIONS EXIST
+# ──────────────────────────────────────────────
+$keepPart   = Get-Partition -DiskNumber $DiskNumber -PartitionNumber $KeepPartitionNumber   -ErrorAction SilentlyContinue
+$removePart = Get-Partition -DiskNumber $DiskNumber -PartitionNumber $RemovePartitionNumber -ErrorAction SilentlyContinue
+ 
+if (-not $keepPart) {
+    Write-Error "Partition $KeepPartitionNumber not found on Disk $DiskNumber."
+    exit 1
+}
+if (-not $removePart) {
+    Write-Error "Partition $RemovePartitionNumber not found on Disk $DiskNumber."
+    exit 1
+}
+if ($KeepPartitionNumber -eq $RemovePartitionNumber) {
+    Write-Error "Keep and Remove partition numbers cannot be the same."
+    exit 1
+}
+ 
+# ──────────────────────────────────────────────
+# ADJACENCY CHECK
+# The kept partition must immediately precede the one being removed.
+# (Windows can only extend a partition into space directly after it.)
+# ──────────────────────────────────────────────
+$keepEnd   = $keepPart.Offset   + $keepPart.Size
+$removeEnd = $removePart.Offset + $removePart.Size
+ 
+$gapBytes = $removePart.Offset - $keepEnd
+ 
+if ($removePart.Offset -lt $keepPart.Offset) {
+    Write-Error ("The partition to remove (#{0}, offset {1} MB) comes BEFORE the partition to keep (#{2}, offset {3} MB).`n" +
+                 "Windows can only extend a partition into space that follows it.`n" +
+                 "Swap your -KeepPartitionNumber and -RemovePartitionNumber, OR use a third-party tool like GParted.") `
+        -f $RemovePartitionNumber, [math]::Round($removePart.Offset/1MB,1),
+           $KeepPartitionNumber,   [math]::Round($keepPart.Offset/1MB,1)
+    exit 1
+}
+ 
+if ($gapBytes -gt 10MB) {
+    Write-Warning ("There is a $([math]::Round($gapBytes/1MB,1)) MB gap between the partitions. " +
+                   "They may not be directly adjacent. Resize-Partition will attempt to fill all " +
+                   "unallocated space after the kept partition, which should still work.")
+}
+ 
+# ──────────────────────────────────────────────
+# SAFETY CHECKS — refuse to remove system/EFI/recovery partitions
+# ──────────────────────────────────────────────
+$protectedTypes = @('System', 'Reserved', 'Recovery', 'Unknown')
+if ($removePart.Type -in $protectedTypes) {
+    Write-Error ("Partition $RemovePartitionNumber is type '$($removePart.Type)' — removing it could make your system unbootable. Aborting.")
+    exit 1
+}
+if ($removePart.IsSystem -or $removePart.IsBoot -or $removePart.IsActive) {
+    Write-Error "Partition $RemovePartitionNumber is flagged as a system/boot/active partition. Aborting to protect bootability."
+    exit 1
+}
+ 
+# ──────────────────────────────────────────────
+# CONFIRMATION SUMMARY
+# ──────────────────────────────────────────────
+Write-Host "`n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor DarkGray
+Write-Host " MERGE PLAN" -ForegroundColor White
+Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━" -ForegroundColor DarkGray
+Write-Host (" KEEP   → Partition {0}  ({1})  {2} GB  [will grow to ~{3} GB]" -f `
+    $KeepPartitionNumber,
+    $(if ($keepPart.DriveLetter) {"Drive $($keepPart.DriveLetter):"} else {"no drive letter"}),
+    [math]::Round($keepPart.Size/1GB, 2),
+    [math]::Round(($keepPart.Size + $removePart.Size)/1GB, 2)
+) -ForegroundColor Green
+ 
+Write-Host (" REMOVE → Partition {0}  ({1})  {2} GB  *** DATA WILL BE DELETED ***" -f `
+    $RemovePartitionNumber,
+    $(if ($removePart.DriveLetter) {"Drive $($removePart.DriveLetter):"} else {"no drive letter"}),
+    [math]::Round($removePart.Size/1GB, 2)
+) -ForegroundColor Red
+Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`n" -ForegroundColor DarkGray
+ 
+Write-Host "  ⚠  ALL DATA on Partition $RemovePartitionNumber will be PERMANENTLY DESTROYED." -ForegroundColor Red
+Write-Host "  ⚠  This cannot be undone. Make sure you have a backup.`n" -ForegroundColor Red
+ 
+$confirm = Read-Host "Type  YES  to proceed, anything else to abort"
+if ($confirm -ne "YES") {
+    Write-Host "`nAborted. No changes were made." -ForegroundColor Yellow
+    exit 0
+}
+ 
+# ──────────────────────────────────────────────
+# STEP 1: REMOVE THE PARTITION
+# ──────────────────────────────────────────────
+Write-Host "`n[1/2] Removing Partition $RemovePartitionNumber..." -ForegroundColor Yellow
+try {
+    Remove-Partition -DiskNumber $DiskNumber -PartitionNumber $RemovePartitionNumber -Confirm:$false -ErrorAction Stop
+    Write-Host "      Partition $RemovePartitionNumber removed. Space is now unallocated." -ForegroundColor Green
+} catch {
+    Write-Error "Failed to remove partition: $_"
+    Write-Host "No further changes were made." -ForegroundColor Yellow
+    exit 1
+}
+ 
+# ──────────────────────────────────────────────
+# STEP 2: EXTEND THE KEPT PARTITION
+# ──────────────────────────────────────────────
+Write-Host "[2/2] Extending Partition $KeepPartitionNumber into the freed space..." -ForegroundColor Yellow
+try {
+    $sizeInfo = Get-PartitionSupportedSize -DiskNumber $DiskNumber -PartitionNumber $KeepPartitionNumber -ErrorAction Stop
+    $maxSize  = $sizeInfo.SizeMax
+ 
+    Resize-Partition -DiskNumber $DiskNumber -PartitionNumber $KeepPartitionNumber -Size $maxSize -ErrorAction Stop
+ 
+    Write-Host ("      Partition $KeepPartitionNumber extended to {0} GB." -f [math]::Round($maxSize/1GB, 2)) -ForegroundColor Green
+} catch {
+    Write-Error "Failed to extend partition: $_"
+    Write-Host "`nThe removed partition's space is now UNALLOCATED." -ForegroundColor Yellow
+    Write-Host "You can recover it manually:" -ForegroundColor Yellow
+    Write-Host "  1. Open Disk Management (diskmgmt.msc)" -ForegroundColor White
+    Write-Host "  2. Right-click Partition $KeepPartitionNumber → 'Extend Volume...'" -ForegroundColor White
+    exit 1
+}
+ 
+# ──────────────────────────────────────────────
+# DONE
+# ──────────────────────────────────────────────
+Write-Host "`n✓ Merge complete." -ForegroundColor Green
+Show-DiskLayout -Disk $DiskNumber
+
+USAGE: 
+# Run as Administrator — right-click PowerShell → "Run as administrator"
+
+# Step 1: See your disk layout
+.\Merge-Partitions.ps1 -ListOnly
+
+# Step 2: Do the merge (example: keep partition 3, remove partition 4, on disk 0)
+.\Merge-Partitions.ps1 -DiskNumber 0 -KeepPartitionNumber 3 -RemovePartitionNumber 4
